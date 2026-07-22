@@ -31,19 +31,25 @@ A combined lifecycle benchmark is omitted because it hides which phase is respon
 
 The allocator comparison used the system allocator, jemalloc, mimalloc v3, rpmalloc, snmalloc, and Google's current TCMalloc. Every number in this table is the median time for **only `drop(input)`** on the idiomatic representation; build and traversal are excluded. Results come from five-sample runs on an Apple M2 (`aarch64`, Linux, Rust 1.97).
 
-| Global allocator | Boxed AST | `Arc` DAG | Nested `Vec`s | Boxed list |
-|---|---:|---:|---:|---:|
-| System | 14.85 ms | 17.07 ms | 12.85 ms | 904 µs |
-| jemalloc | 9.56 ms | 13.23 ms | 9.10 ms | 459 µs |
-| **mimalloc v3** | **3.67 ms** | **7.04 ms** | **3.16 ms** | **240 µs** |
-| rpmalloc | 4.41 ms | 8.23 ms | 3.76 ms | 287 µs |
-| snmalloc | 3.80 ms | 7.41 ms | 3.42 ms | 287 µs |
-| TCMalloc | 13.63 ms | 16.98 ms | 11.41 ms | 532 µs |
-| Global bump diagnostic | 2.33 ms | 6.19 ms | 1.37 ms | 171 µs |
+The non-reclaiming global bump allocator defines the empirical lower boundary. Its `dealloc` is a no-op, but Rust must still execute recursive drop glue, visit nested containers, and update reference counts. The final column is the geometric mean of the four per-workload slowdowns relative to that boundary:
 
-Mimalloc was the fastest allocator that actually supports deallocation in every idiomatic drop workload, so it is selected as the default feature. Rpmalloc won some construction cases, but mimalloc was the best fit for this project's focus on teardown and remained competitive in build and traversal.
+```text
+overhead = geometric_mean(allocator time / global-bump time)
+```
 
-The global bump allocator is not a general-purpose winner: its `dealloc` operation does nothing and all memory remains allocated until process exit. It is included only as a diagnostic. Its results isolate costs that remain when freeing memory is free:
+| Global allocator | Boxed AST | `Arc` DAG | Nested `Vec`s | Boxed list | Overhead vs bump |
+|---|---:|---:|---:|---:|---:|
+| Global bump diagnostic | 2.33 ms | 6.19 ms | 1.37 ms | 171 µs | 1.00× |
+| **mimalloc v3** | **3.67 ms** | **7.04 ms** | **3.16 ms** | **240 µs** | **1.55×** |
+| snmalloc | 3.80 ms | 7.41 ms | 3.42 ms | 287 µs | 1.69× |
+| rpmalloc | 4.41 ms | 8.23 ms | 3.76 ms | 287 µs | 1.85× |
+| jemalloc | 9.56 ms | 13.23 ms | 9.10 ms | 459 µs | 3.54× |
+| TCMalloc | 13.63 ms | 16.98 ms | 11.41 ms | 532 µs | 4.52× |
+| System | 14.85 ms | 17.07 ms | 12.85 ms | 904 µs | 5.43× |
+
+Mimalloc was the reclaiming allocator closest to the lower boundary and the fastest in every idiomatic drop workload, so it is selected as the default feature. Rpmalloc won some construction cases, but mimalloc was the best fit for this project's focus on teardown and remained competitive in build and traversal.
+
+The global bump allocator is not a general-purpose winner: all memory remains allocated until process exit. It is included only as a diagnostic. Its results isolate costs that remain when freeing memory is free:
 
 - The boxed AST still spends 2.33 ms recursively running drop glue.
 - The `Arc` DAG still spends 6.19 ms performing reference-count operations and walking nodes.
