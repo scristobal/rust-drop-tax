@@ -11,27 +11,45 @@ Focused Divan benchmarks for data structures where idiomatic Rust ownership make
 
 Alternative representations such as indexed `Vec` storage, CSR, and iterative custom drop are intentionally omitted. They can solve much of the same problem as an arena, but would obscure the comparison this project is intended to make.
 
-## What is measured
+## Part I: Drop
 
-Each representation has three independent measurements:
+The primary question is how much latency Rust's automatic ownership teardown can introduce when it requires an O(n) walk containing recursive drop glue, reference-count operations, or one deallocation per object.
 
-- `build`: construct the data structure; Divan drops the result outside the timer
-- `traverse`: calculate an equivalent checksum; construction and destruction occur outside the timer
-- `drop`: construct outside the timer and measure only destruction
+### Drop measurement
 
-For a structure built once, traversed `k` times, and then destroyed, its approximate total cost is:
+Divan constructs each input outside the timed region. The measured operation is only:
 
-```text
-build + k × traverse + drop
+```rust
+drop(input);
 ```
 
-A combined lifecycle benchmark is omitted because it hides which phase is responsible and is redundant with the separate measurements.
+The arena contains only dropless data with one shared lifetime. Dropping it releases its backing chunks without visiting individual nodes.
 
-## Allocator comparison: idiomatic drop only
+### Idiomatic lower bound and arena result
 
-The allocator comparison used the system allocator, jemalloc, mimalloc v3, rpmalloc, snmalloc, and Google's current TCMalloc. Every number in this table is the median time for **only `drop(input)`** on the idiomatic representation; build and traversal are excluded. Results come from five-sample runs on an Apple M2 (`aarch64`, Linux, Rust 1.97).
+The global bump diagnostic gives an empirical lower bound for the **idiomatic representation**. Its `dealloc` is a no-op, so it removes the cost of actually freeing allocations while retaining all recursive drop glue, nested-container visits, and `Arc` reference-count operations.
 
-The non-reclaiming global bump allocator defines the empirical lower boundary. Its `dealloc` is a no-op, but Rust must still execute recursive drop glue, visit nested containers, and update reference counts. The final column is the geometric mean of the four per-workload slowdowns relative to that boundary:
+These are five-sample medians from an Apple M2 (`aarch64`, Linux, Rust 1.97). Mimalloc v3 is used for the reclaiming idiomatic and arena columns.
+
+| Workload | Nodes | Idiomatic drop | Global-bump lower bound | Arena drop |
+|---|---:|---:|---:|---:|
+| Boxed AST | 1,048,575 | 3.67 ms | 2.33 ms | 0.79 µs |
+| `Arc` DAG | 1,000,000 | 7.04 ms | 6.19 ms | 0.87 µs |
+| Nested edge `Vec`s | 1,000,000 | 3.16 ms | 1.37 ms | 1.33 µs |
+| Deep boxed list | 25,000 | 240 µs | 171 µs | 0.17 µs |
+
+The arena can be faster than the global-bump lower bound because the bound applies to the original idiomatic representation. A no-op `dealloc` does not stop Rust from recursively walking a boxed tree, decrementing `Arc` counts, or dropping every nested `Vec`; arena teardown avoids that per-object work entirely.
+
+The lower-bound measurements isolate the irreducible work imposed by those ownership representations:
+
+- The boxed AST still spends 2.33 ms recursively running drop glue when freeing is free.
+- The `Arc` DAG still spends 6.19 ms walking nodes and updating reference counts.
+- The nested structure still spends 1.37 ms visiting and dropping one `Vec` per node.
+- The recursive boxed list still spends 171 µs walking its chain.
+
+### General-purpose allocator overhead
+
+The following table keeps the same idiomatic drop measurements while varying only the global allocator. The last column is the geometric mean of the four per-workload slowdowns relative to the global-bump lower bound:
 
 ```text
 overhead = geometric_mean(allocator time / global-bump time)
@@ -47,37 +65,47 @@ overhead = geometric_mean(allocator time / global-bump time)
 | TCMalloc | 13.63 ms | 16.98 ms | 11.41 ms | 532 µs | 4.52× |
 | System | 14.85 ms | 17.07 ms | 12.85 ms | 904 µs | 5.43× |
 
-Mimalloc was the reclaiming allocator closest to the lower boundary and the fastest in every idiomatic drop workload, so it is selected as the default feature. Rpmalloc won some construction cases, but mimalloc was the best fit for this project's focus on teardown and remained competitive in build and traversal.
+Mimalloc was the reclaiming allocator closest to the lower bound and the fastest in every idiomatic drop workload, so it is selected by default. A better allocator substantially reduces the tax, but cannot remove the O(n) ownership work.
 
-The global bump allocator is not a general-purpose winner: all memory remains allocated until process exit. It is included only as a diagnostic. Its results isolate costs that remain when freeing memory is free:
+The global bump allocator is only a diagnostic: all memory remains allocated until process exit. It defaults to one sample and reserves 8 GiB of virtual address space. Increasing its sample count can exhaust physical memory.
 
-- The boxed AST still spends 2.33 ms recursively running drop glue.
-- The `Arc` DAG still spends 6.19 ms performing reference-count operations and walking nodes.
-- The nested structure still spends 1.37 ms visiting and dropping one `Vec` per node.
+Sub-microsecond arena drop means mimalloc accepted the arena's few backing allocations into its caches; it does not imply that all physical pages were synchronously returned to the operating system. RSS, forced purging, and cross-thread deallocation require separate measurements.
 
-Because it leaks every benchmark input, the global-bump feature defaults to one sample and reserves 8 GiB of virtual address space. Increasing its sample count can exhaust physical memory.
+## Part II: Build and traversal trade-offs
 
-## Arena comparison with the selected allocator
+Drop latency alone is not enough to choose a representation. The additional measurements check whether an arena pays for fast teardown through slower construction or access. For a structure built once, traversed `k` times, and then destroyed, the approximate total is:
 
-These medians use mimalloc v3. Each cell shows **idiomatic / arena**.
+```text
+build + k × traverse + drop
+```
 
-| Workload | Nodes | Build | Traverse | Drop |
-|---|---:|---:|---:|---:|
-| Boxed AST | 1,048,575 | 10.18 / 3.41 ms | 2.45 / 1.70 ms | 3.67 ms / 0.79 µs |
-| `Arc` DAG | 1,000,000 | 7.75 / 2.68 ms | 2.23 / 1.67 ms | 7.04 ms / 0.87 µs |
-| Nested edge `Vec`s | 1,000,000 | 6.11 / 5.90 ms | 7.21 / 7.22 ms | 3.16 ms / 1.33 µs |
-| Deep boxed list | 25,000 | 131 / 92 µs | 51.7 / 39.1 µs | 240 µs / 0.17 µs |
+A combined lifecycle benchmark is omitted because it hides which phase is responsible and is redundant with these separate measurements.
 
-For these intentionally adverse ownership patterns, idiomatic teardown cost was not recovered elsewhere:
+Each cell below shows **idiomatic / arena** using mimalloc v3.
 
-- Arena traversal was faster for the AST, DAG, and list.
-- Nested traversal was effectively identical.
-- Arena construction was faster or approximately equal.
-- Arena drop required only a few allocator calls, while idiomatic drop retained its O(n) walk.
+| Workload | Nodes | Build | Traverse |
+|---|---:|---:|---:|
+| Boxed AST | 1,048,575 | 10.18 / 3.41 ms | 2.45 / 1.70 ms |
+| `Arc` DAG | 1,000,000 | 7.75 / 2.68 ms | 2.23 / 1.67 ms |
+| Nested edge `Vec`s | 1,000,000 | 6.11 / 5.90 ms | 7.21 / 7.22 ms |
+| Deep boxed list | 25,000 | 131 / 92 µs | 51.7 / 39.1 µs |
 
-Sub-microsecond arena drop means mimalloc accepted the arena's backing allocations into its caches; it does not imply that all physical pages were synchronously returned to the operating system. RSS, forced purging, and cross-thread deallocation require separate measurements.
+### Why build improves
 
-The key result is not that Rust's `drop` instruction is intrinsically slow. The bottleneck appears when ownership semantics require an O(n) walk containing allocator calls, reference-count operations, or recursive drop glue, while the application's actual lifetime model would permit O(number of arena chunks) reclamation.
+The idiomatic structures call the global allocator for every `Box`, `Arc`, or nested edge `Vec`. The arena reserves a large chunk and usually services each request with alignment plus a local pointer increment. It avoids repeated size-class lookup, allocator metadata updates, and synchronization. Building the DAG also avoids the atomic reference-count increments performed by `Arc::clone` for every edge.
+
+### Why traversal can improve as a side-effect bonus
+
+Traversal does not allocate, so bump allocation does not directly make the traversal instructions faster. The improvement is a side effect of the layout created during construction:
+
+- Arena nodes are densely packed into a small number of chunks.
+- Related nodes are more likely to occupy nearby cache lines and pages.
+- Dense placement can reduce cache misses, TLB misses, allocator padding, and fragmentation.
+- `Arc` nodes carry control-block metadata and live in separate allocations; arena references point directly into dense node storage.
+
+No reference counts are changed during the measured DAG traversal—the improvement there is primarily locality. The nested-edge benchmark is a useful control: both representations still follow a pointer to each edge slice, and their traversal times are effectively identical. The traversal gain is therefore a useful bonus for these particular layouts, not an inherent guarantee of every arena.
+
+Inputs are freshly constructed immediately before traversal, so these measurements represent a relatively warm first pass. Repeated hot traversal and explicitly cold-cache traversal would be useful separate experiments.
 
 ## Running
 
