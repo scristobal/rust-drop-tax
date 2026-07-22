@@ -27,9 +27,9 @@ build + k × traverse + drop
 
 A combined lifecycle benchmark is omitted because it hides which phase is responsible and is redundant with the separate measurements.
 
-## Allocator comparison
+## Allocator comparison: idiomatic drop only
 
-The allocator comparison used the system allocator, jemalloc, mimalloc v3, rpmalloc, snmalloc, and Google's current TCMalloc. The table contains median idiomatic drop times from five-sample runs on an Apple M2 (`aarch64`, Linux, Rust 1.97).
+The allocator comparison used the system allocator, jemalloc, mimalloc v3, rpmalloc, snmalloc, and Google's current TCMalloc. Every number in this table is the median time for **only `drop(input)`** on the idiomatic representation; build and traversal are excluded. Results come from five-sample runs on an Apple M2 (`aarch64`, Linux, Rust 1.97).
 
 | Global allocator | Boxed AST | `Arc` DAG | Nested `Vec`s | Boxed list |
 |---|---:|---:|---:|---:|
