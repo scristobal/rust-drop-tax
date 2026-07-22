@@ -1,4 +1,6 @@
-# rust-drop-tax
+# Beyond the Allocator: Rust Drop vs Arenas
+
+### The Hidden Cost of Rust’s Drop Semantics
 
 Focused Divan benchmarks for data structures where idiomatic Rust ownership makes teardown expensive. Each workload compares a deliberately difficult idiomatic representation with a lifetime-based arena representation.
 
